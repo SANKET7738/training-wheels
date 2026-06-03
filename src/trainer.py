@@ -91,36 +91,83 @@ def _setup_logger(run_name: str, log_file: Path) -> logging.Logger:
 
 
 def _save_curves(history: dict[str, list[float]], plots_dir: Path) -> None:
-    epochs = list(range(1, len(history["train_loss"]) + 1))
+    """History-driven plotting: inspects which keys are present and emits a
+    plot per metric family.
 
+    A "metric family" is everything that ends in the same suffix after a
+    split-prefix (e.g., `train_loss`, `val_loss`, `test_loss` form the
+    "loss" family). For any family with at least one non-empty series we
+    write `<family>_curve.png`. Families with extra components (like the
+    distillation `train_soft_loss` / `train_hard_loss`) get their own
+    `<family>_components.png` showing the breakdown.
+    """
+    n_epochs = max((len(v) for v in history.values()), default=0)
+    if n_epochs == 0:
+        return
+    epochs = list(range(1, n_epochs + 1))
+
+    families: dict[str, dict[str, list[float]]] = {}
+    for key, values in history.items():
+        if not values or not isinstance(values[0], (int, float)):
+            continue
+        if "_" not in key:
+            continue
+        prefix, suffix = key.split("_", 1)
+        if prefix not in {"train", "val", "test"}:
+            continue
+        families.setdefault(suffix, {})[prefix] = values
+
+    style = {"train": "o", "val": "^", "test": "s"}
+
+    for family, series in families.items():
+        # base curve: one line per split present (train/val/test).
+        base_splits = {k: v for k, v in series.items() if k in {"train", "val", "test"} and v}
+        if base_splits:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            for split in ("train", "val", "test"):
+                if split in base_splits:
+                    ax.plot(
+                        epochs[: len(base_splits[split])],
+                        base_splits[split],
+                        marker=style[split],
+                        label=split,
+                    )
+            ax.set_xlabel("epoch")
+            ax.set_ylabel(family.replace("_", " "))
+            ax.set_title(f"{family} curve")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"{family}_curve.png", dpi=120)
+            plt.close(fig)
+
+
+def _save_components_plot(
+    history: dict[str, list[float]],
+    plots_dir: Path,
+    filename: str,
+    title: str,
+    keys: list[str],
+) -> None:
+    """Plot multiple keys from history on a single figure (e.g., loss
+    components for distillation).
+    """
+    present = [k for k in keys if history.get(k)]
+    if not present:
+        return
+    n = max(len(history[k]) for k in present)
+    epochs = list(range(1, n + 1))
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(epochs, history["train_loss"], marker="o", label="train")
-    if history["test_loss"]:
-        ax.plot(epochs, history["test_loss"], marker="s", label="test")
-    if history["val_loss"]:
-        ax.plot(epochs, history["val_loss"], marker="^", label="val")
+    for k in present:
+        ax.plot(epochs[: len(history[k])], history[k], marker="o", label=k)
     ax.set_xlabel("epoch")
-    ax.set_ylabel("loss")
-    ax.set_title("Loss curve")
+    ax.set_ylabel("value")
+    ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(plots_dir / "loss_curve.png", dpi=120)
+    fig.savefig(plots_dir / filename, dpi=120)
     plt.close(fig)
-
-    if history["test_acc"]:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(epochs, history["test_acc"], marker="s", label="test")
-        if history["val_acc"]:
-            ax.plot(epochs, history["val_acc"], marker="^", label="val")
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("accuracy")
-        ax.set_title("Accuracy curve")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "acc_curve.png", dpi=120)
-        plt.close(fig)
 
 
 class Trainer:
@@ -149,9 +196,10 @@ class Trainer:
         self.optimizer = _build_optimizer(self.model.parameters(), cfg.optimizer)
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def _train_one_epoch(self, loader: DataLoader, epoch: int) -> float:
+    def _train_one_epoch(self, loader: DataLoader, epoch: int) -> dict[str, float]:
         self.model.train()
         running_loss = 0.0
+        correct = 0
         n_samples = 0
         for step, (x, y) in enumerate(loader, start=1):
             x = x.to(self.device, non_blocking=True)
@@ -167,6 +215,8 @@ class Trainer:
 
             bs = x.size(0)
             running_loss += loss.item() * bs
+            with torch.no_grad():
+                correct += (logits.argmax(dim=1) == y).sum().item()
             n_samples += bs
 
             if step % self.cfg.log_interval == 0:
@@ -174,7 +224,8 @@ class Trainer:
                     f"  epoch {epoch} step {step}/{len(loader)} loss={loss.item():.4f}"
                 )
 
-        return running_loss / max(n_samples, 1)
+        n = max(n_samples, 1)
+        return {"loss": running_loss / n, "acc": correct / n}
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader) -> dict[str, float]:
@@ -210,6 +261,19 @@ class Trainer:
         torch.save(payload, ckpt_path)
         self.logger.info(f"Saved final checkpoint: {ckpt_path}")
 
+    def _extra_test_metrics(self, loader: DataLoader) -> dict[str, float]:
+        """Hook for subclasses to add domain-specific test-time metrics
+        (e.g., teacher-student agreement for distillation). Keys are
+        recorded under `test_<key>` in history.
+        """
+        return {}
+
+    def _save_extra_plots(self, history: dict[str, list[float]], plots_dir: Path) -> None:
+        """Hook for subclasses to emit additional plots beyond the
+        history-driven defaults.
+        """
+        return None
+
     def fit(self) -> dict[str, Any]:
         self.datamodule.setup()
         train_loader = self.datamodule.train_dataloader()
@@ -222,38 +286,38 @@ class Trainer:
         self.logger.info(f"Model params: {n_params:,}")
         self.logger.info(f"Assets dir: {self.dirs['root']}")
 
-        history: dict[str, list[float]] = {
-            "train_loss": [],
-            "val_loss": [],
-            "val_acc": [],
-            "test_loss": [],
-            "test_acc": [],
-            "epoch_time_s": [],
-        }
+        history: dict[str, list[float]] = {"epoch_time_s": []}
+
+        def _record(prefix: str, metrics: dict[str, float], line_parts: list[str]) -> None:
+            for k, v in metrics.items():
+                history.setdefault(f"{prefix}_{k}", []).append(v)
+                line_parts.append(f"{prefix}_{k}={v:.4f}")
 
         for epoch in range(1, self.cfg.epochs + 1):
             t0 = time.time()
-            train_loss = self._train_one_epoch(train_loader, epoch)
+            train_metrics = self._train_one_epoch(train_loader, epoch)
             elapsed = time.time() - t0
-            history["train_loss"].append(train_loss)
             history["epoch_time_s"].append(elapsed)
 
-            line = f"epoch {epoch} train_loss={train_loss:.4f} time={elapsed:.1f}s"
+            line_parts = [f"epoch {epoch}"]
+            _record("train", train_metrics, line_parts)
+            line_parts.append(f"time={elapsed:.1f}s")
 
             if self.cfg.eval_every_epoch:
                 if val_loader is not None:
-                    val_metrics = self.evaluate(val_loader)
-                    history["val_loss"].append(val_metrics["loss"])
-                    history["val_acc"].append(val_metrics["acc"])
-                    line += f" val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['acc']:.4f}"
+                    _record("val", self.evaluate(val_loader), line_parts)
                 test_metrics = self.evaluate(test_loader)
-                history["test_loss"].append(test_metrics["loss"])
-                history["test_acc"].append(test_metrics["acc"])
-                line += f" test_loss={test_metrics['loss']:.4f} test_acc={test_metrics['acc']:.4f}"
+                _record("test", test_metrics, line_parts)
+                extras = self._extra_test_metrics(test_loader)
+                if extras:
+                    _record("test", extras, line_parts)
 
-            self.logger.info(line)
+            self.logger.info(" ".join(line_parts))
 
         final_test = self.evaluate(test_loader)
+        final_extras = self._extra_test_metrics(test_loader)
+        final_metrics: dict[str, float] = {**final_test, **final_extras}
+
         result: dict[str, Any] = {
             "run_name": self.run_name,
             "device": str(self.device),
@@ -262,17 +326,17 @@ class Trainer:
             "final_test_loss": final_test["loss"],
             "final_test_acc": final_test["acc"],
         }
+        for k, v in final_extras.items():
+            result[f"final_test_{k}"] = v
 
         with open(self.dirs["logs"] / "metrics.json", "w") as f:
             json.dump(result, f, indent=2)
 
         _save_curves(history, self.dirs["plots"])
+        self._save_extra_plots(history, self.dirs["plots"])
         self.logger.info(f"Saved plots to {self.dirs['plots']}")
 
-        self._save_final_ckpt({
-            "test_loss": final_test["loss"],
-            "test_acc": final_test["acc"],
-        })
+        self._save_final_ckpt(final_metrics)
 
         return result
 
