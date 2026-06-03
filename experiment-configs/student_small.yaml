@@ -1,0 +1,28 @@
+# Small MLP intended as the distillation student baseline (exercise 2).
+# Trained on hard labels only here; the distillation run will reuse the
+# same architecture but swap the loss.
+
+run_name: student_small
+
+model:
+  arch: mlp
+  hidden_dims: [64]
+  activation: relu
+  dropout: 0.0
+
+data:
+  batch_size: 128
+  eval_batch_size: 256
+  num_workers: 2
+  normalize: true
+
+trainer:
+  epochs: 5
+  device: auto
+  seed: 42
+  log_interval: 200
+  eval_every_epoch: true
+  optimizer:
+    name: adam
+    lr: 1e-3
+    weight_decay: 0.0
