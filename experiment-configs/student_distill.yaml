@@ -1,0 +1,33 @@
+# Distill the trained teacher (assets/teacher/ckpts/final.pt) into a
+# small student with the same architecture as student_small.yaml.
+# Compare to student_small (hard labels only) to see the lift.
+
+run_name: student_distill
+
+model:
+  arch: mlp
+  hidden_dims: [64]
+  activation: relu
+  dropout: 0.0
+
+data:
+  batch_size: 128
+  eval_batch_size: 256
+  num_workers: 2
+  normalize: true
+
+trainer:
+  epochs: 5
+  device: auto
+  seed: 42
+  log_interval: 200
+  eval_every_epoch: true
+  optimizer:
+    name: adam
+    lr: 1e-3
+    weight_decay: 0.0
+
+distillation:
+  teacher_ckpt: assets/teacher/ckpts/final.pt
+  temperature: 3.0
+  alpha: 0.7
