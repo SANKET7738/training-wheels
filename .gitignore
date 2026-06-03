@@ -1,0 +1,22 @@
+task/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+
+# Datasets and run artifacts
+data/
+assets/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
